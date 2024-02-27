@@ -6,7 +6,10 @@ import numpy as np
 EPISODES = 50
 BATCH_SIZE = 5000
 LR = 1e-2
+TRAIN_STEPS = 10
 GAMMA = 0.99
+EPSILON = 0.2
+ENTROPY_COEF = 0.01
 
 class RLModel:
     def __init__(self):
@@ -33,6 +36,22 @@ def actor_critic_loss(model, buffer):
     critic_loss = advantage.pow(2).mean()
     return loss + critic_loss
 
+def ppo_loss(model, buffer):
+    act = model(Tensor(buffer["states"]))
+    taken = act[Tensor.arange(act.shape[0]),Tensor(buffer["actions"], dtype=dtypes.uint8)]
+    
+    values = critic(Tensor(buffer["states"]))
+    advantage = Tensor(buffer["rewards"], dtype=dtypes.float) - values
+
+    ratio = taken / buffer["old_probs"]
+    clip = ratio.clip(1 - EPSILON, 1 + EPSILON)
+    loss = -Tensor.minimum(ratio * advantage, clip * advantage).mean() 
+
+    entropy_loss = (act * act.log()).mean()
+
+    critic_loss = advantage.pow(2).mean()
+    return loss + critic_loss + ENTROPY_COEF * entropy_loss
+
 class Critic:
     def __init__(self):
         self.fc1 = nn.Linear(in_features=4, out_features=32)
@@ -57,13 +76,6 @@ def rewards_to_go(ep_rews, gamma=0.99):
     ep_rews.reverse()
     return (np.flip(np.cumsum(ep_rews)) * np.power(gamma,np.arange(len(ep_rews)))).tolist()
 
-env = gym.make("CartPole-v1")
-model = RLModel()
-critic = Critic()
-opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
-
-buffer = {}
-
 @TinyJit
 def get_action(obs:Tensor) -> Tensor:
     Tensor.no_grad=True
@@ -72,13 +84,21 @@ def get_action(obs:Tensor) -> Tensor:
     return a
 
 @TinyJit
-def train_step():
+def train_step() -> Tensor:
     with Tensor.train():
         opt.zero_grad()
-        loss = actor_critic_loss(model, buffer)
+        loss = ppo_loss(model, buffer)
         loss.backward()
         opt.step()
     return loss
+
+
+env = gym.make("CartPole-v1")
+model = RLModel()
+critic = Critic()
+opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
+
+buffer = {}
 
 if __name__ == "__main__":
     for i in range(EPISODES):
@@ -103,6 +123,8 @@ if __name__ == "__main__":
             buffer["rewards"] += (rewards_to_go(ep_rews, gamma=GAMMA))
             if len(buffer["actions"]) > BATCH_SIZE:
                 break
-        buffer["losses"].append(train_step().numpy())
+        buffer["old_probs"] = model(Tensor(buffer["states"]))[Tensor.arange(len(buffer["states"])),Tensor(buffer["actions"], dtype=dtypes.uint8)]
+        for _ in range(TRAIN_STEPS):
+            buffer["losses"].append(train_step().numpy())
         print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {max(buffer['lengths'])}")
 
