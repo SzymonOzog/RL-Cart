@@ -6,6 +6,7 @@ import numpy as np
 EPISODES = 50
 BATCH_SIZE = 5000
 LR = 1e-2
+GAMMA = 0.99
 
 class RLModel:
     def __init__(self):
@@ -25,8 +26,9 @@ def vanilla_loss(model, buffer):
 
 def actor_critic_loss(model, buffer):
     act = model(Tensor(buffer["states"]))
+    values = critic(Tensor(buffer["states"]))
+    advantage = Tensor(buffer["rewards"], dtype=dtypes.float) - values
     taken = act[Tensor.arange(act.shape[0]),Tensor(buffer["actions"], dtype=dtypes.uint8)]
-    advantage = calc_advantage(buffer)
     loss = -(taken.log() * advantage).mean()
     critic_loss = advantage.pow(2).mean()
     return loss + critic_loss
@@ -51,19 +53,9 @@ def reward_to_go(rews):
         rtgs[i] = rews[i] + (rtgs[i+1] if i+1 < n else 0)
     return rtgs
 
-def rewards_to_go(ep_rews):
+def rewards_to_go(ep_rews, gamma=0.99):
     ep_rews.reverse()
-    return np.flip(np.cumsum(ep_rews)).tolist()
-
-def calc_advantage(buffer, gamma=0.99):
-    q_vals = Tensor.zeros(0)
-    values = Tensor.zeros(0)
-    for vals, rews in zip(buffer["values"], buffer["rewards"]):
-        discounts = np.power(gamma, np.arange(len(rews)))
-        q = Tensor(rews,dtype=dtypes.float) * Tensor(discounts,dtype=dtypes.float)
-        q_vals = Tensor.cat(q_vals, q)
-        values = Tensor.cat(values, Tensor.stack(vals).flatten())
-    return q_vals - values
+    return (np.flip(np.cumsum(ep_rews)) * np.power(gamma,np.arange(len(ep_rews)))).tolist()
 
 env = gym.make("CartPole-v1")
 model = RLModel()
@@ -96,28 +88,21 @@ if __name__ == "__main__":
         buffer["states"] = []
         buffer["losses"] = []
         buffer["rewards"] = []
-        buffer["values"] = []
         buffer["lengths"] = []
         while True:
             ep_rews = []
-            ep_vals = []
             done = False
             obs, _ = env.reset()
             while not done: 
                 buffer["states"].append(obs)
-                with Tensor.train():
-                    value = critic(Tensor(obs))
-                ep_vals.append(value)
                 action = get_action(Tensor(obs)).item()
                 obs, rew, done, _, _= env.step(action)
                 buffer["actions"].append(action)
                 ep_rews.append(rew)
                 buffer["lengths"].append(len(ep_rews))
-            buffer["rewards"].append(rewards_to_go(ep_rews))
-            buffer["values"].append(ep_vals)
+            buffer["rewards"] += (rewards_to_go(ep_rews, gamma=GAMMA))
             if len(buffer["actions"]) > BATCH_SIZE:
                 break
-
         buffer["losses"].append(train_step().numpy())
         print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {max(buffer['lengths'])}")
 
