@@ -1,5 +1,5 @@
 import gymnasium as gym
-from tinygrad import Tensor, nn
+from tinygrad import Tensor, nn, TinyJit
 from tinygrad.dtype import dtypes
 import numpy as np
 
@@ -29,7 +29,6 @@ def actor_critic_loss(model, buffer):
     advantage = calc_advantage(buffer)
     loss = -(taken.log() * advantage).mean()
     critic_loss = advantage.pow(2).mean()
-    # print(loss.numpy(), critic_loss.numpy(), advantage.numpy())
     return loss + critic_loss
 
 class Critic:
@@ -73,8 +72,26 @@ opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
 
 buffer = {}
 
+@TinyJit
+def get_action(obs:Tensor) -> Tensor:
+    Tensor.no_grad=True
+    a = model(obs).multinomial().realize()
+    Tensor.no_grad=False
+    return a
+
+@TinyJit
+def train_step():
+    with Tensor.train():
+        opt.zero_grad()
+        loss = actor_critic_loss(model, buffer)
+        loss.backward()
+        opt.step()
+    return loss
+
 if __name__ == "__main__":
     for i in range(EPISODES):
+        get_action.reset()
+        train_step.reset()
         buffer["actions"] = []
         buffer["states"] = []
         buffer["losses"] = []
@@ -88,12 +105,10 @@ if __name__ == "__main__":
             obs, _ = env.reset()
             while not done: 
                 buffer["states"].append(obs)
-                Tensor.no_grad=True
-                action = model(Tensor(obs)).multinomial().realize().item()
-                Tensor.no_grad=False
                 with Tensor.train():
                     value = critic(Tensor(obs))
                 ep_vals.append(value)
+                action = get_action(Tensor(obs)).item()
                 obs, rew, done, _, _= env.step(action)
                 buffer["actions"].append(action)
                 ep_rews.append(rew)
@@ -102,11 +117,7 @@ if __name__ == "__main__":
             buffer["values"].append(ep_vals)
             if len(buffer["actions"]) > BATCH_SIZE:
                 break
-        with Tensor.train():
-            opt.zero_grad()
-            loss = actor_critic_loss(model, buffer)
-            loss.backward()
-            opt.step()
-        buffer["losses"].append(loss.numpy())
+
+        buffer["losses"].append(train_step().numpy())
         print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {max(buffer['lengths'])}")
 
