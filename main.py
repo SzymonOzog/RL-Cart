@@ -23,16 +23,16 @@ class RLModel:
         return x.softmax()
 
 def vanilla_loss(model, buffer):
-    act = model(Tensor(buffer["states"]))
-    taken = act[Tensor.arange(act.shape[0]),Tensor(buffer["actions"], dtype=dtypes.uint8)]
-    loss = -(taken.log() * Tensor.stack(buffer["rewards"])).mean()
+    act = model(buffer["states"])
+    taken = act[Tensor.arange(act.shape[0]),buffer["actions"]]
+    loss = -(taken.log() * buffer["rewards"]).mean()
     return loss
 
 def actor_critic_loss(model, buffer):
-    act = model(Tensor(buffer["states"]))
-    values = critic(Tensor(buffer["states"]))
-    advantage = Tensor(buffer["rewards"], dtype=dtypes.float) - values
-    taken = act[Tensor.arange(act.shape[0]),Tensor(buffer["actions"], dtype=dtypes.uint8)]
+    act = model(buffer["states"])
+    values = critic(buffer["states"])
+    advantage = buffer["rewards"] - values
+    taken = act[Tensor.arange(act.shape[0]),buffer["actions"]]
     loss = -(taken.log() * advantage).mean()
     critic_loss = advantage.pow(2).mean()
     return loss + critic_loss
@@ -85,7 +85,7 @@ def get_action(obs:Tensor) -> Tensor:
 def train_step() -> Tensor:
     with Tensor.train():
         opt.zero_grad()
-        loss = ppo_loss(model, buffer)
+        loss = vanilla_loss(model, buffer)
         loss.backward()
         opt.step()
     return loss
