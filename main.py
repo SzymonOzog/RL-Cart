@@ -3,13 +3,14 @@ from tinygrad import Tensor, nn, TinyJit
 from tinygrad.dtype import dtypes
 import numpy as np
 
-EPISODES = 50
-BATCH_SIZE = 5000
+EPISODES = 500
+BATCH_SIZE = 512
 LR = 1e-2
 TRAIN_STEPS = 10
 GAMMA = 0.99
 EPSILON = 0.2
-ENTROPY_COEF = 0.01
+ENTROPY_COEF = 0.0005
+SOLVED_THRESHOLD = 10000
 
 class RLModel:
     def __init__(self):
@@ -37,15 +38,16 @@ def actor_critic_loss(model, buffer):
     return loss + critic_loss
 
 def ppo_loss(model, buffer):
-    act = model(Tensor(buffer["states"]))
-    taken = act[Tensor.arange(act.shape[0]),Tensor(buffer["actions"], dtype=dtypes.uint8)]
+    samples = Tensor.randint(BATCH_SIZE, high=buffer["rewards"].shape[0]).realize()
+    act = model(buffer["states"][samples])
+    taken = act[Tensor.arange(act.shape[0]),buffer["actions"][samples]]
     
-    values = critic(Tensor(buffer["states"]))
-    advantage = Tensor(buffer["rewards"], dtype=dtypes.float) - values
+    values = critic(buffer["states"][samples])
+    advantage = buffer["rewards"][samples] - values
 
-    ratio = taken / buffer["old_probs"]
+    ratio = taken / buffer["old_probs"][samples]
     clip = ratio.clip(1 - EPSILON, 1 + EPSILON)
-    loss = -Tensor.minimum(ratio * advantage, clip * advantage).mean() 
+    loss = -Tensor.minimum(ratio * advantage, clip * advantage).mean()
 
     entropy_loss = (act * act.log()).mean()
 
@@ -65,16 +67,12 @@ class Critic:
 def cummulative_rewards(ep_rews):
     return [sum(ep_rews)] * len(ep_rews)
 
-def reward_to_go(rews):
-    n = len(rews)
-    rtgs = np.zeros_like(rews)
-    for i in reversed(range(n)):
-        rtgs[i] = rews[i] + (rtgs[i+1] if i+1 < n else 0)
-    return rtgs
-
-def rewards_to_go(ep_rews, gamma=0.99):
+def rewards_to_go(ep_rews, gamma=0.99, standardize=False):
     ep_rews.reverse()
-    return (np.flip(np.cumsum(ep_rews)) * np.power(gamma,np.arange(len(ep_rews)))).tolist()
+    rews = (np.flip(np.cumsum(ep_rews)) * np.power(gamma,np.arange(len(ep_rews))))
+    if standardize:
+        rews = (rews - np.mean(rews)) / (np.std(rews) + 1e-8)
+    return rews.tolist()
 
 @TinyJit
 def get_action(obs:Tensor) -> Tensor:
@@ -93,11 +91,21 @@ def train_step() -> Tensor:
     return loss
 
 
+def show_results():
+    env = gym.make("CartPole-v1", render_mode="human")
+    obs, _ = env.reset()
+    while True:
+        env.render()
+        action = get_action(Tensor(obs)).item()
+        obs, _, done, _, _= env.step(action)
+        if done:
+            break
+    env.close()
+
 env = gym.make("CartPole-v1")
 model = RLModel()
 critic = Critic()
 opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
-
 buffer = {}
 
 if __name__ == "__main__":
@@ -119,12 +127,20 @@ if __name__ == "__main__":
                 obs, rew, done, _, _= env.step(action)
                 buffer["actions"].append(action)
                 ep_rews.append(rew)
-                buffer["lengths"].append(len(ep_rews))
-            buffer["rewards"] += (rewards_to_go(ep_rews, gamma=GAMMA))
+                if len(ep_rews) > SOLVED_THRESHOLD:
+                    show_results()
+                    exit()
+            buffer["lengths"].append(len(ep_rews))
+
+            buffer["rewards"] += (rewards_to_go(ep_rews, gamma=GAMMA, standardize=True))
             if len(buffer["actions"]) > BATCH_SIZE:
                 break
-        buffer["old_probs"] = model(Tensor(buffer["states"]))[Tensor.arange(len(buffer["states"])),Tensor(buffer["actions"], dtype=dtypes.uint8)]
+        buffer["actions"] = Tensor(buffer["actions"], dtype=dtypes.uint8)
+        buffer["states"] = Tensor(buffer["states"])
+        buffer["rewards"] = Tensor(buffer["rewards"])
+        buffer["lengths"] = Tensor(buffer["lengths"])
+        buffer["old_probs"] = model(buffer["states"])[Tensor.arange(buffer["states"].shape[0]),buffer["actions"]]
         for _ in range(TRAIN_STEPS):
             buffer["losses"].append(train_step().numpy())
-        print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {max(buffer['lengths'])}")
+        print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {buffer['lengths'].max().numpy()}")
 
