@@ -2,6 +2,7 @@ import gymnasium as gym
 from tinygrad import Tensor, nn, TinyJit
 from tinygrad.dtype import dtypes
 import numpy as np
+import matplotlib.pyplot as plt
 
 EPISODES = 500
 BATCH_SIZE = 512
@@ -85,7 +86,7 @@ def get_action(obs:Tensor) -> Tensor:
 def train_step() -> Tensor:
     with Tensor.train():
         opt.zero_grad()
-        loss = vanilla_loss(model, buffer)
+        loss = loss_fn(model, buffer)
         loss.backward()
         opt.step()
     return loss
@@ -106,9 +107,12 @@ env = gym.make("CartPole-v1")
 model = RLModel()
 critic = Critic()
 opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
+loss_fn = ppo_loss
 buffer = {}
 
-if __name__ == "__main__":
+def run_training():
+    step = 0
+    steps, losses, lengths = [], [], []
     for i in range(EPISODES):
         get_action.reset()
         train_step.reset()
@@ -122,14 +126,15 @@ if __name__ == "__main__":
             done = False
             obs, _ = env.reset()
             while not done: 
+                step += 1
                 buffer["states"].append(obs)
                 action = get_action(Tensor(obs)).item()
                 obs, rew, done, _, _= env.step(action)
                 buffer["actions"].append(action)
                 ep_rews.append(rew)
                 if len(ep_rews) > SOLVED_THRESHOLD:
-                    show_results()
-                    exit()
+                    return True, steps, losses, lengths
+
             buffer["lengths"].append(len(ep_rews))
 
             buffer["rewards"] += (rewards_to_go(ep_rews, gamma=GAMMA, standardize=True))
@@ -142,5 +147,42 @@ if __name__ == "__main__":
         buffer["old_probs"] = model(buffer["states"])[Tensor.arange(buffer["states"].shape[0]),buffer["actions"]]
         for _ in range(TRAIN_STEPS):
             buffer["losses"].append(train_step().numpy())
-        print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {buffer['lengths'].max().numpy()}")
+        # print(f"episode {i}, avg_loss = {(sum(buffer['losses'])/len(buffer['losses']))}, longest episode = {buffer['lengths'].max().numpy()}")
+        steps.append(step)
+        losses.append(sum(buffer["losses"]) / len(buffer["losses"]))
+        lengths.append(buffer["lengths"].max().numpy())
+    return False, steps, losses, lengths
 
+if __name__ == "__main__":
+    outcomes = {}
+    for current_loss in ["vanilla policy gradients", "actor critic", "ppo"]:
+        outcomes[current_loss] = []
+    for lr in [1e-1, 1e-2, 1e-3, 1e-4]:
+        for gamma in [0.99, 0.95, 0.9, 0.85]:
+            solved, steps, losses, lengths = [], [], [], []
+            for current_loss in ["vanilla policy gradients", "actor critic", "ppo"]:
+                exploded = 0
+                loss_fn = vanilla_loss if current_loss == "vanilla policy gradients" else actor_critic_loss if current_loss == "actor critic" else ppo_loss
+                TRAIN_STEPS = 10 if current_loss == "ppo" else 1
+                LR = lr
+                GAMMA = gamma
+                model = RLModel()
+                critic = Critic()
+                opt = nn.optim.Adam(nn.state.get_parameters(model), LR)
+                try:
+                    so, st, lo, le = run_training()
+                    plt.plot(st, le)
+                    print(f"loss = {current_loss}, lr = {lr}, gamma = {gamma}, solved = {so}, steps = {st[-1]}, length = {le[-1]}")
+                    outcomes[current_loss].append(so)
+                except Exception as e:
+                    print(f"exploded with {e}")
+                    exploded += 1
+                print(f"loss = {current_loss}, solved = {sum(solved)}/{len(solved)}, exploded = {exploded}")
+            plt.title(f"gamma = {gamma}, lr = {lr}")
+            plt.xlabel("steps")
+            plt.ylabel("episode length")
+            plt.legend(["vanilla policy gradients", "actor critic", "ppo"])
+            plt.savefig(f"results_{gamma}_{lr}.png")
+            plt.clf()
+    for loss, results in outcomes.items():
+        print(f"{loss} solved {sum(results)}/{len(results)}")
